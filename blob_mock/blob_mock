@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+
+import json
+import uuid
+import hashlib
+
+from flask import Flask, request, make_response, jsonify
+
+
+AUTH_TOKEN_HEADER = 'AuthToken'
+MULTIPART_FILE_KEY = 'file'
+SUPPORTED_HASHES = ['md5', 'sha256']
+HASH_TYPE_PARAMETER_NAME = 'type'
+
+app = Flask(import_name=__name__)
+
+
+BLOBS = {}
+
+
+@app.route('/api/v1/blob', methods=['POST'])
+def new_blob():
+    global BLOBS
+    # Check header
+    if AUTH_TOKEN_HEADER not in request.headers:
+        return make_response(f'Missing {AUTH_TOKEN_HEADER} header', 401)
+    if request.headers.get(AUTH_TOKEN_HEADER, None) != 'USER_TOKEN':
+        return make_response(f'Invalid {AUTH_TOKEN_HEADER} value', 401)
+    if MULTIPART_FILE_KEY not in request.files:
+        return make_response(f'Missing {MULTIPART_FILE_KEY} key in files', 400)
+    # Check request body
+    blobId = hashlib.sha256(str(uuid.uuid4()).encode()).hexdigest()
+    BLOBS[blobId] = {'public': True, 'ACL': []}
+    return make_response(jsonify({'blobId': blobId}), 201)
+
+
+@app.route('/api/v1/blob/<blobId>', methods=['PUT'])
+def replace_blob(blobId):
+    global BLOBS
+    # Check header
+    if AUTH_TOKEN_HEADER not in request.headers:
+        return make_response(f'Missing {AUTH_TOKEN_HEADER} header', 401)
+    if request.headers.get(AUTH_TOKEN_HEADER, None) != 'USER_TOKEN':
+        return make_response(f'Invalid {AUTH_TOKEN_HEADER} value', 401)
+    if MULTIPART_FILE_KEY not in request.files:
+        return make_response(f'Missing {MULTIPART_FILE_KEY} key in files', 400)
+    # Check request body
+    return make_response(jsonify({'blobId': blobId}), 204)
+
+
+@app.route('/api/v1/blob/<blobId>', methods=['DELETE'])
+def delete_blob(blobId):
+    global BLOBS
+    # Check header
+    if AUTH_TOKEN_HEADER not in request.headers:
+        return make_response(f'Missing {AUTH_TOKEN_HEADER} header', 401)
+    if request.headers.get(AUTH_TOKEN_HEADER, None) != 'USER_TOKEN':
+        return make_response(f'Invalid {AUTH_TOKEN_HEADER} value', 401)
+    if blobId not in BLOBS:
+        return make_response(f'Unknown blobId', 404)
+    # Success
+    del BLOBS[blobId]
+    return make_response("", 204)
+
+
+@app.route('/api/v1/blobs', methods=['GET'])
+def get_blobs():
+    global BLOBS
+    # Check header
+    if AUTH_TOKEN_HEADER not in request.headers:
+        return make_response(f'Missing {AUTH_TOKEN_HEADER} header', 401)
+    if request.headers.get(AUTH_TOKEN_HEADER, None) != 'USER_TOKEN':
+        return make_response(f'Invalid {AUTH_TOKEN_HEADER} value', 401)
+    # Get blob list
+    result = {'blobs': list(BLOBS.keys())}
+    return make_response(jsonify(result), 201)
+
+
+@app.route('/api/v1/blob/<blobId>', methods=['GET'])
+def get_blob(blobId):
+    global BLOBS
+    if blobId not in BLOBS:
+        return make_response(f'Blob {blobId} not found', 404)
+
+    if BLOBS[blobId].get('public', False):
+        return make_response('<BLOB CONTENT>', 200)
+
+    # Check header if needed
+    if AUTH_TOKEN_HEADER not in request.headers:
+        return make_response(f'Missing {AUTH_TOKEN_HEADER} header', 401)
+    if request.headers.get(AUTH_TOKEN_HEADER, None) != 'USER_TOKEN':
+        return make_response(f'Invalid {AUTH_TOKEN_HEADER} value', 401)
+    return make_response('<BLOB CONTENT>', 200)
+
+
+@app.route('/api/v1/blob/<blobId>/visibility', methods=['PUT', 'PATCH'])
+def set_blob_visibility(blobId):
+    global BLOBS
+    # Check header if needed
+    if AUTH_TOKEN_HEADER not in request.headers:
+        return make_response(f'Missing {AUTH_TOKEN_HEADER} header', 401)
+    if request.headers.get(AUTH_TOKEN_HEADER, None) != 'USER_TOKEN':
+        return make_response(f'Invalid {AUTH_TOKEN_HEADER} value', 401)
+
+    if blobId not in BLOBS:
+        return make_response(f'Blob {blobId} not found', 404)
+
+    try:
+        request_content = json.loads(request.data)
+    except Exception as error:
+        return make_response(f'Cannot decode request: {error}', 400)
+
+    if 'public' not in request_content:
+        return make_response(f'Key "public" not in request', 400)
+
+    BLOBS[blobId]['public'] = request_content['public']
+    return make_response('', 204)
+
+
+@app.route('/api/v1/blob/<blobId>/hash', methods=['GET'])
+def get_blob_hash(blobId):
+    global BLOBS
+
+    if blobId not in BLOBS:
+        return make_response(f'Blob {blobId} not found', 404)
+
+    if BLOBS[blobId].get('public', False):
+        # Check header if needed
+        if AUTH_TOKEN_HEADER not in request.headers:
+            return make_response(f'Missing {AUTH_TOKEN_HEADER} header', 401)
+        if request.headers.get(AUTH_TOKEN_HEADER, None) != 'USER_TOKEN':
+            return make_response(f'Invalid {AUTH_TOKEN_HEADER} value', 401)
+
+    if HASH_TYPE_PARAMETER_NAME not in request.args:
+        return make_response(f'Missing parameter named "{HASH_TYPE_PARAMETER_NAME}"', 400)
+
+    hash_type = request.args[HASH_TYPE_PARAMETER_NAME]
+    if hash_type.lower() not in SUPPORTED_HASHES:
+        return make_response(f'Unknown hash type: {hash_type}', 400)
+
+    return make_response(jsonify({
+        'hash_type': hash_type,
+        'hexdigest': '<hex digest>'
+    }), 200)
+
+
+app.run(debug=True)

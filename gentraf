@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+
+'''Tool to generate traffic according to some basic rules'''
+
+import csv
+import sys
+import json
+import time
+import logging
+import argparse
+from io import StringIO
+from typing import List, Tuple
+
+from agent.types import TestInfo
+from agent.runner import Runner
+
+import urllib3
+
+
+EXIT_OK = 0
+ERROR_BAD_CLI = 1
+
+
+def main():
+    user_options = parse_commandline()
+    if not user_options:
+        return ERROR_BAD_CLI
+
+    log_level = logging.DEBUG if user_options.debug else logging.INFO
+    if user_options.log_file:
+        logging.basicConfig(filename=user_options.log_file, level=log_level)
+    else:
+        # This logger is very verbose so output in file only
+        logging.getLogger('urllib3').setLevel(logging.WARNING)
+        logging.basicConfig(level=log_level)
+
+
+    logging.debug('Initializing...')
+    test = TestInfo(url=user_options.URL)
+    thread_pool = []
+    samples = []
+    for th_count in range(user_options.threads):
+        thread_pool.append(Runner(test))
+
+    logging.debug('Starting traffic...')
+    for thread in thread_pool:
+        thread.start()
+
+    try:
+        logging.info(f'Running traffic for {user_options.duration} seconds')
+        time.sleep(user_options.duration)
+    except KeyboardInterrupt:
+        logging.warning('User stops... results can be partial')
+
+    logging.debug('Stop traffic...')
+    for thread in thread_pool:
+        thread.stop()
+        samples += thread.samples
+
+    if user_options.format == 'text':
+        formatter = text_format
+    elif user_options.format == 'csv':
+        formatter = csv_format
+    elif user_options.format == 'json':
+        formatter = json_format
+    else:
+        logging.error(f'Wrong/unsupported formatter "{user_options.format}"')
+        return ERROR_BAD_CLI
+
+    output = formatter(samples, user_options.all_samples)
+    if user_options.output is None:
+        print(output)
+    else:
+        with open(user_options.output, 'w', encoding='UTF-8') as contents:
+            contents.write(output)
+
+    return EXIT_OK
+
+
+def parse_commandline():
+    '''Parse and check commandline'''
+    parser = argparse.ArgumentParser(prog=sys.argv[0], description=__doc__)
+    parser.add_argument('URL', action='store', type=str, default=None, help='Root of the API to test')
+    parser.add_argument('-d', '--duration', action='store', type=float, default=300.0, help='Test duration in seconds', dest='duration')
+    parser.add_argument('-t', '--threads', action='store', type=int, default=1, help='Number of threads', dest='threads')
+
+    output = parser.add_argument_group('Output')
+    output.add_argument('-o', '--output', action='store', default=None, help='Write output to file instead of stdout', dest='output')
+    output.add_argument('-f', '--format', action='store', default='text', choices=['text', 'csv', 'json'], help='Output format of the report', dest='format')
+    output.add_argument('--all', action='store_true', help='Include all samples instead of only failed', dest='all_samples')
+
+    logopts = parser.add_argument_group('Logging')
+    logopts.add_argument('-D', '--debug', action='store_true', default=False, help='Set logging level for max verbosity', dest='debug')
+    logopts.add_argument('-l', '--log-file', action='store', default=None, help='Save logging file instead of stderr', dest='log_file')
+
+    args = parser.parse_args()
+    return args
+
+
+def text_format(results: List[Tuple], include_ok: bool=False):
+    '''Format results in text'''
+    failed = 0
+    output = ' Test results report\n'
+    output += '=====================\n'
+    for action, duration, error in results:
+        if error:
+            output += f' [FAIL] {action} {error} ({duration:.3f} seconds)\n'
+            failed += 1
+        else:
+            if include_ok:
+                output += f' [PASS] {action} ({duration:.3f} seconds)\n'
+    output += '=====================\n'
+    output += f' Total samples: {len(results)} ({failed} failed)'
+    return output
+
+
+def json_format(results: List[Tuple], include_ok: bool=False):
+    '''Format results in JSON'''
+    output = {
+        'total_traffic_samples': len(results),
+        'samples': []
+    }
+    failed = 0
+    for action, duration, error in results:
+        if (error is None) and include_ok:
+            output['samples'].append({'action': action, 'running_time': duration})
+            continue
+        output['samples'].append({
+            'action': action,
+            'running_time': duration,
+            'error_cause': error
+        })
+        failed += 1
+    output['failed_traffic_samples'] = failed
+    return json.dumps(output, indent=2)
+
+
+def csv_format(results: List[Tuple], include_ok: bool=False):
+    '''Format results in CSV'''
+    output = StringIO()
+    csv_out = csv.writer(output)
+    csv_out.writerow(['action', 'error', 'duration'])
+    for action, duration, error in results:
+        if (error is None) and include_ok:
+            csv_out.writerow([action, 'PASS', duration])
+            continue
+        csv_out.writerow(action, duration, error)
+    return output.getvalue()
+
+
+if __name__ == '__main__':
+    sys.exit(main())
